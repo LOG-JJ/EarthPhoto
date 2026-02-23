@@ -1,0 +1,39 @@
+﻿<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PhotoGlobeViewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      (function () {
+        var RETRY_KEY = "photoglobe_boot_retry";
+        var MAX_RETRY = 6;
+        var RETRY_DELAY_MS = 1800;
+
+        setTimeout(function () {
+          if (window.__photoGlobeBooted === true) {
+            sessionStorage.removeItem(RETRY_KEY);
+            return;
+          }
+
+          var current = Number(sessionStorage.getItem(RETRY_KEY) || "0");
+          if (current >= MAX_RETRY) {
+            return;
+          }
+          sessionStorage.setItem(RETRY_KEY, String(current + 1));
+          location.reload();
+        }, RETRY_DELAY_MS);
+      })();
+    </script>
+    <script type="module" src="/renderer/bootstrap.ts"></script>
+  </body>
+</html>

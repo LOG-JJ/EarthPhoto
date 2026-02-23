@@ -1,0 +1,7 @@
+# Local photo/video folders (do not commit personal media)
+/2026-*/
+
+# Non-project folders/files in this workspace
+/lan-photo-sync/
+/app.zip
+
