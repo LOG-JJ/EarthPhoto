@@ -2,8 +2,49 @@
 
 로컬 사진/영상의 EXIF GPS를 인덱싱해서 지구본(Cesium.js) 위에 표시하는 Electron 데스크탑 앱입니다.
 
-## 빠른 실행 (권장)
-명령어 입력 없이 더블클릭으로 실행할 수 있습니다.
+## 처음 받는 작업자용 시작 가이드
+아래 순서대로 진행하면 처음 받는 PC에서도 실행할 수 있습니다.
+
+1. 저장소 클론 후 `app` 폴더로 이동
+```powershell
+git clone https://github.com/LOG-JJ/EarthPhoto.git
+cd EarthPhoto\app
+```
+
+2. 필수 프로그램 설치
+- Windows 10/11
+- Node.js **22 LTS** (중요: 24 계열은 `better-sqlite3` 빌드 실패 가능)
+- Visual Studio Build Tools 2022
+- `Desktop development with C++`
+- MSVC v143
+- Windows 10/11 SDK
+- CMake tools
+
+3. (선택) Cesium Ion 토큰 설정  
+기본 실행은 토큰 없이도 가능하지만, 토큰을 쓰면 Cesium 리소스 사용이 안정적입니다.
+```powershell
+setx CESIUM_ION_TOKEN "여기에_토큰"
+```
+
+4. 개발 실행(권장)
+- `start-dev.bat` 더블클릭
+- 또는 PowerShell에서:
+```powershell
+.\start-dev.bat
+```
+
+`start-dev.bat`는 자동으로 아래를 처리합니다.
+- `npm install` (최초 1회)
+- 경로 특수문자 문제 회피(`subst` 임시 드라이브 매핑)
+- 네이티브 모듈(`better-sqlite3`) 복구 시도
+- Vite + Electron 개발 실행
+
+5. 실행 확인
+- 앱이 열리면 `폴더 선택`으로 사진/영상 루트를 추가
+- 인덱싱 완료 후 지구본에 포인트/클러스터가 보이면 정상
+
+## 빠른 실행/배포 명령
+명령어 입력 없이 배치파일만으로 실행 가능합니다.
 
 1. 개발 실행: `start-dev.bat`
 2. Windows 설치 파일 빌드: `build-win.bat`
@@ -38,11 +79,11 @@ $env:CESIUM_ION_TOKEN="여기에_토큰"
 
 ## 개발 환경
 - Windows 10/11
-- Node.js 22 LTS 권장
+- Node.js **22 LTS**
 - Visual Studio Build Tools (C++ 워크로드 권장)
 
 ## 수동 실행 (필요할 때만)
-가능하면 배치 파일 사용을 권장합니다.
+가능하면 배치 파일(`start-dev.bat`) 사용을 권장합니다.
 
 ```powershell
 npm.cmd install
@@ -60,6 +101,7 @@ npm.cmd run dist:win
 1. `better-sqlite3` 바인딩 에러
 - `start-dev.bat` 또는 `build-win.bat`를 먼저 실행하세요.
 - 그래도 동일하면 `npm.cmd run postinstall` 후 재실행하세요.
+- Node 24 이상이면 Node 22 LTS로 변경 후 `npm.cmd install`을 다시 실행하세요.
 
 2. 검은 화면/렌더러 미로드
 - 반드시 `start-dev.bat`로 실행하세요.
@@ -68,6 +110,10 @@ npm.cmd run dist:win
 3. `dist:win` 중 NSIS 실패 (심볼릭 링크 권한)
 - Windows 개발자 모드 활성화 또는 관리자 권한으로 다시 빌드하세요.
 - 실패해도 `release/win-unpacked/PhotoGlobeViewer.exe`는 생성되므로 바로 실행할 수 있습니다.
+
+4. `npm run`이 경로 문제로 실패
+- 폴더 경로에 공백/한글/특수문자가 있으면 직접 `npm run`이 깨질 수 있습니다.
+- 이 프로젝트는 해당 문제를 피하려고 `start-dev.bat`/`build-win.bat` 사용을 전제로 합니다.
 
 ## 다른 사용자에게 공유하는 가장 쉬운 방법
 1. `share-win.bat`를 더블클릭합니다.
