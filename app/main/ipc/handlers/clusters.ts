@@ -2,7 +2,7 @@ import { IPC_CHANNELS } from '@main/ipc/channels';
 import type { IpcContext } from '@main/ipc/context';
 import type { GetClusterMembersPayload, GetClustersPayload } from '@shared/types/ipc';
 
-export function registerClusterHandlers({ ipcMain, clusterService }: IpcContext): void {
+export function registerClusterHandlers({ ipcMain, clusterService, tripService }: IpcContext): void {
   ipcMain.handle(IPC_CHANNELS.GEO_GET_CLUSTERS, async (_event, payload: GetClustersPayload) => {
     return clusterService.getClusters(payload);
   });
@@ -10,4 +10,19 @@ export function registerClusterHandlers({ ipcMain, clusterService }: IpcContext)
   ipcMain.handle(IPC_CHANNELS.GEO_GET_CLUSTER_MEMBERS, async (_event, payload: GetClusterMembersPayload) => {
     return clusterService.getClusterMembers(payload);
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.GEO_GET_TRIPS,
+    async (
+      _event,
+      payload: {
+        filters: GetClustersPayload['filters'];
+        splitHours?: number;
+        splitKm?: number;
+        maxPoints?: number;
+      },
+    ) => {
+      return tripService.getTrips(payload);
+    },
+  );
 }

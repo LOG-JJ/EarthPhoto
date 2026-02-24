@@ -352,9 +352,15 @@ export class ClusterService {
     return JSON.stringify({
       dateFromMs: filters.dateFromMs ?? null,
       dateToMs: filters.dateToMs ?? null,
+      includeUndated: filters.includeUndated ?? false,
       rootIds: [...(filters.rootIds ?? [])].sort((a, b) => a - b),
       mediaTypes: [...(filters.mediaTypes ?? [])].sort(),
       hasGps: filters.hasGps ?? null,
+      cameraModelQuery: filters.cameraModelQuery ?? null,
+      minWidthPx: filters.minWidthPx ?? null,
+      minHeightPx: filters.minHeightPx ?? null,
+      durationFromMs: filters.durationFromMs ?? null,
+      durationToMs: filters.durationToMs ?? null,
     });
   }
 }

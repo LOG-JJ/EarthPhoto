@@ -8,7 +8,9 @@
     "dev": "vite",
     "typecheck": "tsc --noEmit",
     "build": "npm.cmd run typecheck && vite build",
-    "dist:win": "npm.cmd run build && electron-builder --win nsis",
+    "dist:win": "npm.cmd run build && electron-builder --win nsis portable",
+    "dist:win:installer": "npm.cmd run build && electron-builder --win nsis",
+    "dist:win:portable": "npm.cmd run build && electron-builder --win portable",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
@@ -31,7 +33,8 @@
     "react-i18next": "^16.0.0",
     "sharp": "^0.34.3",
     "supercluster": "^8.0.1",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "zustand": "^5.0.11"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
@@ -55,7 +58,8 @@
     "productName": "PhotoGlobeViewer",
     "asar": true,
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
@@ -65,13 +69,21 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "perMachine": false
+      "perMachine": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
     },
     "win": {
       "signAndEditExecutable": false,
+      "icon": "build/icon.ico",
       "target": [
-        "nsis"
+        "nsis",
+        "portable"
       ]
+    },
+    "portable": {
+      "artifactName": "PhotoGlobeViewer-Portable-${version}.${ext}"
     }
   }
 }

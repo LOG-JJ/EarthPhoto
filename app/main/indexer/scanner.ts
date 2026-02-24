@@ -1,50 +1,71 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
+import path from 'node:path';
 
 import fg from 'fast-glob';
 import { lookup as lookupMime } from 'mime-types';
 
-import type { MediaType, ScanFile } from '@shared/types/photo';
+import type { ScanFile } from '@shared/types/photo';
+import { detectMediaTypeFromPath, getMediaGlobPattern } from '@shared/utils/mediaExtensions';
 import { normalizeFsPath } from '@shared/utils/path';
 
-const PHOTO_EXTENSIONS = [
-  'jpg',
-  'jpeg',
-  'png',
-  'heic',
-  'heif',
-  'dng',
-  'cr2',
-  'cr3',
-  'nef',
-  'nrw',
-  'arw',
-  'sr2',
-  'rw2',
-  'orf',
-  'raf',
-  'pef',
-  'srw',
-  'raw',
-];
-const VIDEO_EXTENSIONS = ['mov', 'mp4'];
-const SUPPORTED_EXTENSIONS = [...PHOTO_EXTENSIONS, ...VIDEO_EXTENSIONS];
-const SCAN_STAT_CONCURRENCY = Math.max(8, Math.min(96, os.cpus().length * 6));
+function parsePositiveInt(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
+}
 
-function detectMediaType(filePath: string): MediaType | null {
-  const lower = filePath.toLowerCase();
-  if (PHOTO_EXTENSIONS.some((ext) => lower.endsWith(`.${ext}`))) {
-    return 'photo';
+const DEFAULT_SCAN_STAT_CONCURRENCY = Math.max(4, Math.min(32, os.cpus().length * 2));
+const ENV_SCAN_STAT_CONCURRENCY = parsePositiveInt(process.env.PHOTOGLOBE_SCAN_CONCURRENCY);
+const SCAN_STAT_CONCURRENCY = Math.max(1, Math.min(128, ENV_SCAN_STAT_CONCURRENCY ?? DEFAULT_SCAN_STAT_CONCURRENCY));
+
+async function statMediaPath(absolutePath: string): Promise<ScanFile | null> {
+  try {
+    const stat = await fs.stat(absolutePath);
+    const mediaType = detectMediaTypeFromPath(absolutePath);
+    if (!mediaType) {
+      return null;
+    }
+    const mime = lookupMime(absolutePath);
+    return {
+      path: normalizeFsPath(absolutePath),
+      sizeBytes: stat.size,
+      mtimeMs: Math.trunc(stat.mtimeMs),
+      mediaType,
+      mime: typeof mime === 'string' ? mime : null,
+    };
+  } catch {
+    return null;
   }
-  if (VIDEO_EXTENSIONS.some((ext) => lower.endsWith(`.${ext}`))) {
-    return 'video';
-  }
-  return null;
+}
+
+async function statPathsWithConcurrency(paths: string[]): Promise<ScanFile[]> {
+  const files = new Array<ScanFile | null>(paths.length).fill(null);
+  let cursor = 0;
+
+  const workers = Array.from({ length: Math.min(SCAN_STAT_CONCURRENCY, Math.max(1, paths.length)) }, async () => {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= paths.length) {
+        return;
+      }
+
+      files[index] = await statMediaPath(paths[index]);
+    }
+  });
+
+  await Promise.all(workers);
+  return files.filter((file): file is ScanFile => Boolean(file));
 }
 
 export async function scanMediaFiles(rootPath: string): Promise<ScanFile[]> {
-  const pattern = `**/*.{${SUPPORTED_EXTENSIONS.join(',')}}`;
-  const matches = await fg(pattern, {
+  const matches = await fg(getMediaGlobPattern(), {
     cwd: rootPath,
     absolute: true,
     onlyFiles: true,
@@ -55,39 +76,13 @@ export async function scanMediaFiles(rootPath: string): Promise<ScanFile[]> {
     ignore: ['**/$RECYCLE.BIN/**', '**/System Volume Information/**'],
   });
 
-  const files = new Array<ScanFile | null>(matches.length).fill(null);
-  let cursor = 0;
+  return statPathsWithConcurrency(matches.map((item) => normalizeFsPath(item)));
+}
 
-  const workers = Array.from({ length: Math.min(SCAN_STAT_CONCURRENCY, Math.max(1, matches.length)) }, async () => {
-    while (true) {
-      const index = cursor;
-      cursor += 1;
-      if (index >= matches.length) {
-        return;
-      }
-
-      const absolutePath = matches[index];
-      try {
-        const stat = await fs.stat(absolutePath);
-        const mediaType = detectMediaType(absolutePath);
-        if (!mediaType) {
-          continue;
-        }
-        const mime = lookupMime(absolutePath);
-        files[index] = {
-          path: normalizeFsPath(absolutePath),
-          sizeBytes: stat.size,
-          mtimeMs: Math.trunc(stat.mtimeMs),
-          mediaType,
-          mime: typeof mime === 'string' ? mime : null,
-        };
-      } catch {
-        files[index] = null;
-      }
-    }
-  });
-
-  await Promise.all(workers);
-
-  return files.filter((file): file is ScanFile => Boolean(file));
+export async function scanSpecificMediaFiles(filePaths: string[]): Promise<ScanFile[]> {
+  const uniquePaths = Array.from(new Set(filePaths.map((item) => normalizeFsPath(path.resolve(item)))));
+  if (uniquePaths.length === 0) {
+    return [];
+  }
+  return statPathsWithConcurrency(uniquePaths);
 }

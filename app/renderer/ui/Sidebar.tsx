@@ -3,28 +3,29 @@ import { useTranslation } from 'react-i18next';
 
 import type { AppLanguage } from '@shared/types/settings';
 
-import { LanguageToggle } from './LanguageToggle';
+import type { AppTab } from '@renderer/domain/app/appTabs';
 
-export type SidebarTab = 'filters' | 'preview' | 'system' | 'cities';
+import { LanguageToggle } from './LanguageToggle';
 
 interface SidebarProps {
   collapsed: boolean;
-  activeTab: SidebarTab;
-  onTabChange: (tab: SidebarTab) => void;
+  activeTab: AppTab;
+  onTabChange: (tab: AppTab) => void;
   onToggleCollapsed: () => void;
-  
-  // Content Slots
+
   filtersSlot: ReactNode;
   previewSlot: ReactNode;
+  calendarSlot: ReactNode;
   systemSlot: ReactNode;
   citiesSlot: ReactNode;
-  
-  // System Tab Props
+
   rootPath: string | null;
   phaseText: string;
   watchEnabled: boolean;
+  timelineOverlayEnabled: boolean;
   language: AppLanguage;
   onWatchEnabledChange: (enabled: boolean) => void;
+  onToggleTimelineOverlay: () => void;
   onLanguageChange: (language: AppLanguage) => void;
 }
 
@@ -35,49 +36,58 @@ export function Sidebar({
   onToggleCollapsed,
   filtersSlot,
   previewSlot,
+  calendarSlot,
   systemSlot,
   citiesSlot,
   rootPath,
   phaseText,
   watchEnabled,
+  timelineOverlayEnabled,
   language,
   onWatchEnabledChange,
+  onToggleTimelineOverlay,
   onLanguageChange,
 }: SidebarProps) {
   const { t } = useTranslation();
 
-  const handleDockClick = (tab: SidebarTab) => {
+  const handleDockClick = (tab: AppTab) => {
     if (collapsed) {
       onTabChange(tab);
       onToggleCollapsed();
     } else if (activeTab === tab) {
-      onToggleCollapsed(); // Toggle off if clicking active
+      onToggleCollapsed();
     } else {
-      onTabChange(tab); // Switch tab
+      onTabChange(tab);
     }
   };
 
-  const getTabTitle = (tab: SidebarTab) => {
+  const getTabTitle = (tab: AppTab) => {
     switch (tab) {
-      case 'filters': return t('filters.title') || 'Search';
-      case 'preview': return t('preview.title') || 'Inspect';
-      case 'system': return t('sidebar.settings') || 'System';
-      case 'cities': return t('sidebar.cities') || 'Cities';
-      default: return '';
+      case 'filters':
+        return t('filters.title') || 'Search';
+      case 'preview':
+        return t('preview.title') || 'Inspect';
+      case 'calendar':
+        return t('calendar.title') || 'Calendar';
+      case 'system':
+        return t('sidebar.settings') || 'System';
+      case 'cities':
+        return t('sidebar.cities') || 'Cities';
+      default:
+        return '';
     }
   };
 
   return (
     <>
-      {/* Modular Glass Card (Floating Panel) */}
       {!collapsed && (
         <div className="glass-card-container">
           <div className="glass-card">
             <header className="glass-card-header">
               <h2>{getTabTitle(activeTab)}</h2>
-              <button 
-                type="button" 
-                className="card-close-btn" 
+              <button
+                type="button"
+                className="card-close-btn"
                 onClick={onToggleCollapsed}
                 aria-label={t('ui.closePanel')}
               >
@@ -89,13 +99,15 @@ export function Sidebar({
 
             <div className="glass-card-content">
               {activeTab === 'filters' && filtersSlot}
-              
+
               {activeTab === 'preview' && previewSlot}
-              
+
+              {activeTab === 'calendar' && calendarSlot}
+
               {activeTab === 'system' && (
                 <div className="system-panel">
                   <LanguageToggle language={language} onChange={onLanguageChange} />
-                  
+
                   <section className="panel">
                     <h3>{t('sidebar.selectedFolder')}</h3>
                     <p className="path-text">{rootPath ?? t('sidebar.none')}</p>
@@ -108,12 +120,12 @@ export function Sidebar({
                       {t('sidebar.watch')}
                     </label>
                   </section>
-  
+
                   <section className="panel">
                     <h3>{t('progress.phase')}</h3>
                     <p className="status-text">{phaseText}</p>
                   </section>
-  
+
                   {systemSlot}
                 </div>
               )}
@@ -124,12 +136,13 @@ export function Sidebar({
         </div>
       )}
 
-      {/* Dynamic Floating Dock */}
-      <nav className="floating-dock-container">
-        <button 
+      <nav className="floating-dock-container" aria-label={t('sidebar.dockNavigation')}>
+        <button
           type="button"
           className={`dock-item ${activeTab === 'filters' && !collapsed ? 'active' : ''}`}
           onClick={() => handleDockClick('filters')}
+          aria-label={t('sidebar.openFilters')}
+          title={t('sidebar.openFilters')}
         >
           <span className="dock-tooltip">{t('filters.title')}</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -138,10 +151,12 @@ export function Sidebar({
           </svg>
         </button>
 
-        <button 
+        <button
           type="button"
           className={`dock-item ${activeTab === 'preview' && !collapsed ? 'active' : ''}`}
           onClick={() => handleDockClick('preview')}
+          aria-label={t('sidebar.openPreview')}
+          title={t('sidebar.openPreview')}
         >
           <span className="dock-tooltip">{t('preview.title')}</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -150,10 +165,27 @@ export function Sidebar({
           </svg>
         </button>
 
-        <button 
+        <button
+          type="button"
+          className={`dock-item ${timelineOverlayEnabled ? 'active' : ''}`}
+          onClick={onToggleTimelineOverlay}
+          aria-label={t('sidebar.timelineTripToggle')}
+          title={t('sidebar.timelineTripToggle')}
+          aria-pressed={timelineOverlayEnabled}
+        >
+          <span className="dock-tooltip">{t('sidebar.timelineTripToggle')}</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M2 19h20" />
+            <path d="M3 16h7l9-9c.7-.7.7-1.9 0-2.6-.7-.7-1.9-.7-2.6 0l-9 9V6L4 4H3l1 6-2 2h1l2-1v5Z" />
+          </svg>
+        </button>
+
+        <button
           type="button"
           className={`dock-item ${activeTab === 'system' && !collapsed ? 'active' : ''}`}
           onClick={() => handleDockClick('system')}
+          aria-label={t('sidebar.openSystem')}
+          title={t('sidebar.openSystem')}
         >
           <span className="dock-tooltip">{t('sidebar.settings')}</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -166,11 +198,29 @@ export function Sidebar({
           type="button"
           className={`dock-item ${activeTab === 'cities' && !collapsed ? 'active' : ''}`}
           onClick={() => handleDockClick('cities')}
+          aria-label={t('sidebar.openCities')}
+          title={t('sidebar.openCities')}
         >
           <span className="dock-tooltip">{t('sidebar.cities')}</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <path d="M12 22s8-4.3 8-11a8 8 0 1 0-16 0c0 6.7 8 11 8 11Z" />
             <circle cx="12" cy="11" r="2.5" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          className={`dock-item ${activeTab === 'calendar' && !collapsed ? 'active' : ''}`}
+          onClick={() => handleDockClick('calendar')}
+          aria-label={t('sidebar.openCalendar')}
+          title={t('sidebar.openCalendar')}
+        >
+          <span className="dock-tooltip">{t('calendar.title')}</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
+            <line x1="16" y1="2" x2="16" y2="6" />
+            <line x1="8" y1="2" x2="8" y2="6" />
+            <line x1="3" y1="10" x2="21" y2="10" />
           </svg>
         </button>
       </nav>

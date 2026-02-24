@@ -7,6 +7,8 @@ import { createThumbnailFromEmbeddedPreview } from './embeddedPreview';
 import { resolveFfmpegInputPath } from './ffmpegPathAlias';
 import { runFfmpegWithFallback } from './ffmpegRunner';
 
+const THUMBNAIL_FFMPEG_TIMEOUT_MS = 3500;
+
 function getVideoEncodeProfile(size: number): { quality: number; effort: number } {
   if (size <= 64) {
     return { quality: 40, effort: 0 };
@@ -102,7 +104,7 @@ export async function createVideoThumbnail(sourcePath: string, targetPath: strin
         '2',
         tempJpg,
       ],
-    ]);
+    ], { timeoutMs: THUMBNAIL_FFMPEG_TIMEOUT_MS });
 
     await sharp(tempJpg, { sequentialRead: true })
       .resize(size, size, {

@@ -89,11 +89,12 @@ export class ExifMetadataExtractor {
     );
   }
 
-  async extract(filePath: string, mediaType: MediaType, workerHint = 0): Promise<ExtractedMetadata> {
-    const tool = this.exiftools[Math.abs(workerHint) % this.exiftools.length];
-    const tags = await tool.read(filePath);
-    const { width, height } = pickResolution(tags);
+  private pickTool(workerHint = 0): ExifTool {
+    return this.exiftools[Math.abs(workerHint) % this.exiftools.length];
+  }
 
+  private toMetadata(tags: Tags, mediaType: MediaType, includeCameraModel: boolean): ExtractedMetadata {
+    const { width, height } = pickResolution(tags);
     return {
       lat: parseNumber(tags.GPSLatitude) ?? null,
       lng: parseNumber(tags.GPSLongitude) ?? null,
@@ -102,8 +103,26 @@ export class ExifMetadataExtractor {
       width,
       height,
       durationMs: mediaType === 'video' ? parseDurationMs(tags.Duration) : null,
-      cameraModel: typeof tags.Model === 'string' ? tags.Model : null,
+      cameraModel: includeCameraModel && typeof tags.Model === 'string' ? tags.Model : null,
     };
+  }
+
+  async extractQuick(filePath: string, mediaType: MediaType, workerHint = 0): Promise<ExtractedMetadata> {
+    const tool = this.pickTool(workerHint);
+    const tags = await tool.read(filePath, { readArgs: ['-fast2'] });
+    return this.toMetadata(tags, mediaType, true);
+  }
+
+  async extractFull(filePath: string, mediaType: MediaType, workerHint = 0): Promise<ExtractedMetadata> {
+    const tool = this.pickTool(workerHint);
+    const tags = await tool.read(filePath, { readArgs: [] });
+    return this.toMetadata(tags, mediaType, true);
+  }
+
+  async extract(filePath: string, mediaType: MediaType, workerHint = 0): Promise<ExtractedMetadata> {
+    const tool = this.exiftools[Math.abs(workerHint) % this.exiftools.length];
+    const tags = await tool.read(filePath);
+    return this.toMetadata(tags, mediaType, true);
   }
 
   async shutdown(): Promise<void> {

@@ -23,6 +23,13 @@ export interface IndexStatus extends IndexProgress {
   finishedAtMs: number | null;
 }
 
+export interface RootListItem {
+  id: number;
+  path: string;
+  lastScanAtMs: number | null;
+  updatedAtMs: number;
+}
+
 export interface GetClustersPayload {
   bbox: [number, number, number, number];
   zoom: number;
@@ -53,10 +60,94 @@ export interface OpenSourceResult {
   error?: string;
 }
 
+export interface PreviewStripRequestPayload {
+  requestId: string;
+  photoIds: number[];
+  size: 64 | 128;
+  visibleCount: number;
+  burst: 'aggressive' | 'balanced' | 'low';
+}
+
+export interface PreviewStripProgressPayload {
+  requestId: string;
+  photoId: number;
+  path: string | null;
+  cacheHit: boolean;
+  done: number;
+  total: number;
+  status: 'ready' | 'error' | 'cancelled' | 'complete';
+}
+
 export interface HoverPreviewInfo {
   path: string;
   cacheHit: boolean;
   kind: 'image' | 'video';
+}
+
+export interface TimelineExtentInfo {
+  minMs: number | null;
+  maxMs: number | null;
+  datedCount: number;
+  undatedCount: number;
+}
+
+export interface DateMediaCountItem {
+  date: string;
+  photoCount: number;
+  videoCount: number;
+  totalCount: number;
+}
+
+export interface TripPoint {
+  photoId: number;
+  lat: number;
+  lng: number;
+  takenAtMs: number;
+  mediaType: 'photo' | 'video';
+}
+
+export interface TripSegment {
+  tripId: string;
+  colorIndex: number;
+  startAtMs: number;
+  endAtMs: number;
+  distanceKm: number;
+  durationMs: number;
+  pointCount: number;
+  points: TripPoint[];
+}
+
+export type UxEventName =
+  | 'app_opened'
+  | 'first_data_visible'
+  | 'point_or_cluster_clicked'
+  | 'timeline_opened'
+  | 'trip_enabled'
+  | 'playback_started'
+  | 'source_opened'
+  | 'index_started'
+  | 'index_completed'
+  | 'index_failed';
+
+export type UxEventProps = Record<string, string | number | boolean>;
+
+export interface UxEventRecord {
+  name: UxEventName;
+  atMs: number;
+  props?: UxEventProps;
+}
+
+export interface SessionMetricsSummary {
+  sessionId: string;
+  startedAtMs: number;
+  endedAtMs: number | null;
+  eventCount: number;
+  funnel: Array<{
+    step: UxEventName;
+    reached: boolean;
+    atMs: number | null;
+    elapsedFromStartMs: number | null;
+  }>;
 }
 
 export type ThumbnailPriority = 'high' | 'normal' | 'low';
@@ -115,6 +206,7 @@ export interface ElectronApi {
     getClusters: (payload: GetClustersPayload) => Promise<ClusterItem[]>;
     getPoints: (payload: GetPointsPayload) => Promise<PointItem[]>;
     getClusterMembers: (payload: GetClusterMembersPayload) => Promise<PointNode[]>;
+    getTrips: (payload: { filters: Filters; splitHours?: number; splitKm?: number; maxPoints?: number }) => Promise<TripSegment[]>;
   };
   media: {
     getThumbnail: (payload: {
@@ -122,6 +214,9 @@ export interface ElectronApi {
       size: 64 | 128 | 256 | 512;
       priority?: ThumbnailPriority;
     }) => Promise<{ path: string; cacheHit: boolean }>;
+    requestPreviewStrip: (payload: PreviewStripRequestPayload) => Promise<{ ok: boolean }>;
+    cancelPreviewStrip: (payload: { requestId: string }) => Promise<{ ok: boolean }>;
+    onPreviewStripProgress: (listener: (progress: PreviewStripProgressPayload) => void) => () => void;
     prefetchThumbnails: (payload: {
       photoIds: number[];
       size: 64 | 128 | 256 | 512;
@@ -130,12 +225,26 @@ export interface ElectronApi {
     countPrefetchTargets: (payload: { filters: Filters }) => Promise<{ total: number }>;
     getPrefetchTargetIds: (payload: { filters: Filters; limit: number; offset: number }) => Promise<{ ids: number[] }>;
     getHoverPreview: (payload: { photoId: number; width?: 240 | 320 | 480 }) => Promise<HoverPreviewInfo>;
+    getDailyCounts: (payload: { filters: Filters; limit?: number }) => Promise<DateMediaCountItem[]>;
+    getTimelineExtent: (payload: { filters: Filters }) => Promise<TimelineExtentInfo>;
     getSource: (payload: { photoId: number }) => Promise<MediaSourceInfo>;
     openSource: (payload: { photoId: number }) => Promise<OpenSourceResult>;
   };
   settings: {
     get: () => Promise<AppSettings>;
     set: (payload: Partial<AppSettings>) => Promise<AppSettings>;
+    addRecentRoot: (payload: { path: string }) => Promise<AppSettings>;
+    addRoot: (payload: { path: string }) => Promise<AppSettings>;
+    removeRoot: (payload: { rootId: number }) => Promise<AppSettings>;
+    setActiveRoots: (payload: { rootIds: number[] }) => Promise<AppSettings>;
+    listRoots: () => Promise<RootListItem[]>;
+  };
+  metrics: {
+    track: (payload: { name: UxEventName; props?: UxEventProps }) => Promise<void>;
+    getSessionSummary: () => Promise<SessionMetricsSummary>;
+    listRecentSessions: (payload: { limit: number }) => Promise<SessionMetricsSummary[]>;
+    exportRecentSessions: (payload: { limit: number; format: 'json' }) => Promise<{ path: string }>;
+    resetCurrentSession: () => Promise<{ ok: boolean }>;
   };
   cities: {
     ensureCatalog: () => Promise<CityCatalogStatus>;

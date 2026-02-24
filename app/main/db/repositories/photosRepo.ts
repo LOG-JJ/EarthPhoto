@@ -2,6 +2,7 @@ import path from 'node:path';
 
 import type Database from 'better-sqlite3';
 
+import type { DateMediaCountItem, TimelineExtentInfo, TripPoint } from '@shared/types/ipc';
 import type { PointItem, PhotoRecord, PhotoUpsertInput } from '@shared/types/photo';
 import type { Filters } from '@shared/types/settings';
 import { normalizeFsPath } from '@shared/utils/path';
@@ -11,6 +12,22 @@ export interface ExistingPhotoSnapshot {
   path: string;
   mtimeMs: number;
   sizeBytes: number;
+  isDeleted: number;
+}
+
+export interface PhotoMetadataPatchInput {
+  rootId: number;
+  path: string;
+  lat: number | null;
+  lng: number | null;
+  alt: number | null;
+  takenAtMs: number | null;
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+  cameraModel: string | null;
+  lastIndexedAtMs: number;
+  lastError: string | null;
 }
 
 interface FilterSql {
@@ -20,8 +37,9 @@ interface FilterSql {
 
 export class PhotosRepository {
   private readonly upsertStmt;
-  private readonly markDeletedStmt;
-  private readonly restoreStmt;
+  private readonly markDeletedByPathStmt;
+  private readonly restoreByPathStmt;
+  private readonly patchMetadataStmt;
   private readonly byIdStmt;
   private readonly updateThumbStmt;
   private readonly setErrorStmt;
@@ -97,8 +115,27 @@ export class PhotosRepository {
         lastError = excluded.lastError
     `);
 
-    this.markDeletedStmt = db.prepare('UPDATE photos SET isDeleted = 1 WHERE rootId = ?');
-    this.restoreStmt = db.prepare('UPDATE photos SET isDeleted = 0, lastIndexedAtMs = ? WHERE path = ?');
+    this.markDeletedByPathStmt = db.prepare(
+      'UPDATE photos SET isDeleted = 1, lastIndexedAtMs = @lastIndexedAtMs WHERE rootId = @rootId AND path = @path',
+    );
+    this.restoreByPathStmt = db.prepare(
+      'UPDATE photos SET isDeleted = 0, lastIndexedAtMs = @lastIndexedAtMs WHERE path = @path',
+    );
+    this.patchMetadataStmt = db.prepare(`
+      UPDATE photos
+      SET
+        lat = COALESCE(@lat, lat),
+        lng = COALESCE(@lng, lng),
+        alt = COALESCE(@alt, alt),
+        takenAtMs = COALESCE(@takenAtMs, takenAtMs),
+        width = COALESCE(@width, width),
+        height = COALESCE(@height, height),
+        durationMs = COALESCE(@durationMs, durationMs),
+        cameraModel = COALESCE(@cameraModel, cameraModel),
+        lastIndexedAtMs = @lastIndexedAtMs,
+        lastError = @lastError
+      WHERE rootId = @rootId AND path = @path
+    `);
     this.byIdStmt = db.prepare('SELECT * FROM photos WHERE id = ? LIMIT 1');
     this.updateThumbStmt = db.prepare(
       'UPDATE photos SET thumbPath = @thumbPath, thumbUpdatedAtMs = @thumbUpdatedAtMs, lastError = NULL WHERE id = @id',
@@ -108,7 +145,7 @@ export class PhotosRepository {
   }
 
   getExistingByRoot(rootId: number): Map<string, ExistingPhotoSnapshot> {
-    const rows = this.db.prepare('SELECT id, path, mtimeMs, sizeBytes FROM photos WHERE rootId = ?').all(rootId) as
+    const rows = this.db.prepare('SELECT id, path, mtimeMs, sizeBytes, isDeleted FROM photos WHERE rootId = ?').all(rootId) as
       | ExistingPhotoSnapshot[]
       | undefined;
     const map = new Map<string, ExistingPhotoSnapshot>();
@@ -118,17 +155,25 @@ export class PhotosRepository {
     return map;
   }
 
-  markAllDeleted(rootId: number): void {
-    this.markDeletedStmt.run(rootId);
-  }
-
-  restoreUnchanged(paths: string[], lastIndexedAtMs: number): void {
+  markDeletedByPaths(rootId: number, paths: string[], lastIndexedAtMs: number): void {
     if (paths.length === 0) {
       return;
     }
     const tx = this.db.transaction((items: string[]) => {
       for (const item of items) {
-        this.restoreStmt.run(lastIndexedAtMs, item);
+        this.markDeletedByPathStmt.run({ rootId, path: item, lastIndexedAtMs });
+      }
+    });
+    tx(paths);
+  }
+
+  restoreByPaths(paths: string[], lastIndexedAtMs: number): void {
+    if (paths.length === 0) {
+      return;
+    }
+    const tx = this.db.transaction((items: string[]) => {
+      for (const item of items) {
+        this.restoreByPathStmt.run({ path: item, lastIndexedAtMs });
       }
     });
     tx(paths);
@@ -141,6 +186,18 @@ export class PhotosRepository {
     const tx = this.db.transaction((rows: PhotoUpsertInput[]) => {
       for (const row of rows) {
         this.upsertStmt.run(row);
+      }
+    });
+    tx(records);
+  }
+
+  patchMetadataBatch(records: PhotoMetadataPatchInput[]): void {
+    if (records.length === 0) {
+      return;
+    }
+    const tx = this.db.transaction((rows: PhotoMetadataPatchInput[]) => {
+      for (const row of rows) {
+        this.patchMetadataStmt.run(row);
       }
     });
     tx(records);
@@ -242,6 +299,77 @@ export class PhotosRepository {
     return rows.map((row) => row.id);
   }
 
+  getTimelineExtent(filters: Filters): TimelineExtentInfo {
+    const filterSql = this.buildFilterSql(filters, true);
+    const sql = `
+      SELECT
+        MIN(takenAtMs) AS minMs,
+        MAX(takenAtMs) AS maxMs,
+        SUM(CASE WHEN takenAtMs IS NOT NULL THEN 1 ELSE 0 END) AS datedCount,
+        SUM(CASE WHEN takenAtMs IS NULL THEN 1 ELSE 0 END) AS undatedCount
+      FROM photos
+      WHERE ${filterSql.where}
+    `;
+    const row = this.db.prepare(sql).get(...filterSql.params) as
+      | { minMs: number | null; maxMs: number | null; datedCount: number | null; undatedCount: number | null }
+      | undefined;
+    return {
+      minMs: row?.minMs ?? null,
+      maxMs: row?.maxMs ?? null,
+      datedCount: row?.datedCount ?? 0,
+      undatedCount: row?.undatedCount ?? 0,
+    };
+  }
+
+  getDailyCounts(filters: Filters, limit = 730): DateMediaCountItem[] {
+    const safeLimit = Math.max(1, Math.min(5_000, Math.trunc(limit) || 730));
+    const filterSql = this.buildFilterSql(filters, false);
+    const sql = `
+      SELECT
+        strftime('%Y-%m-%d', datetime(takenAtMs / 1000, 'unixepoch', 'localtime')) AS date,
+        SUM(CASE WHEN mediaType = 'photo' THEN 1 ELSE 0 END) AS photoCount,
+        SUM(CASE WHEN mediaType = 'video' THEN 1 ELSE 0 END) AS videoCount,
+        COUNT(1) AS totalCount
+      FROM photos
+      WHERE ${filterSql.where}
+        AND takenAtMs IS NOT NULL
+      GROUP BY date
+      ORDER BY date DESC
+      LIMIT ?
+    `;
+    const rows = this.db.prepare(sql).all(...filterSql.params, safeLimit) as Array<{
+      date: string;
+      photoCount: number;
+      videoCount: number;
+      totalCount: number;
+    }>;
+    return rows.map((row) => ({
+      date: row.date,
+      photoCount: row.photoCount ?? 0,
+      videoCount: row.videoCount ?? 0,
+      totalCount: row.totalCount ?? 0,
+    }));
+  }
+
+  getTripPoints(filters: Filters): TripPoint[] {
+    const filterSql = this.buildFilterSql(filters, true);
+    const sql = `
+      SELECT id AS photoId, lat, lng, takenAtMs, mediaType
+      FROM photos
+      WHERE ${filterSql.where}
+        AND takenAtMs IS NOT NULL
+      ORDER BY takenAtMs ASC, id ASC
+    `;
+    const rows = this.db.prepare(sql).all(...filterSql.params) as Array<{
+      photoId: number;
+      lat: number;
+      lng: number;
+      takenAtMs: number;
+      mediaType: 'photo' | 'video';
+    }>;
+    return rows;
+  }
+
   private buildFilterSql(filters: Filters, requireGps: boolean): FilterSql {
     const where: string[] = ['isDeleted = 0'];
     const params: unknown[] = [];
@@ -264,14 +392,49 @@ export class PhotosRepository {
       params.push(...filters.mediaTypes);
     }
 
+    const dateClauses: string[] = [];
+    const dateParams: unknown[] = [];
     if (typeof filters.dateFromMs === 'number') {
-      where.push('takenAtMs >= ?');
-      params.push(filters.dateFromMs);
+      dateClauses.push('takenAtMs >= ?');
+      dateParams.push(filters.dateFromMs);
+    }
+    if (typeof filters.dateToMs === 'number') {
+      dateClauses.push('takenAtMs <= ?');
+      dateParams.push(filters.dateToMs);
+    }
+    if (dateClauses.length > 0) {
+      if (filters.includeUndated) {
+        where.push(`((${dateClauses.join(' AND ')}) OR takenAtMs IS NULL)`);
+      } else {
+        where.push(dateClauses.join(' AND '));
+      }
+      params.push(...dateParams);
     }
 
-    if (typeof filters.dateToMs === 'number') {
-      where.push('takenAtMs <= ?');
-      params.push(filters.dateToMs);
+    const cameraQuery = filters.cameraModelQuery?.trim().toLowerCase() ?? '';
+    if (cameraQuery.length > 0) {
+      where.push("LOWER(COALESCE(cameraModel, '')) LIKE ?");
+      params.push(`%${cameraQuery}%`);
+    }
+
+    if (typeof filters.minWidthPx === 'number' && Number.isFinite(filters.minWidthPx)) {
+      where.push('width IS NOT NULL', 'width >= ?');
+      params.push(filters.minWidthPx);
+    }
+
+    if (typeof filters.minHeightPx === 'number' && Number.isFinite(filters.minHeightPx)) {
+      where.push('height IS NOT NULL', 'height >= ?');
+      params.push(filters.minHeightPx);
+    }
+
+    if (typeof filters.durationFromMs === 'number' && Number.isFinite(filters.durationFromMs)) {
+      where.push('durationMs IS NOT NULL', 'durationMs >= ?');
+      params.push(filters.durationFromMs);
+    }
+
+    if (typeof filters.durationToMs === 'number' && Number.isFinite(filters.durationToMs)) {
+      where.push('durationMs IS NOT NULL', 'durationMs <= ?');
+      params.push(filters.durationToMs);
     }
 
     return {

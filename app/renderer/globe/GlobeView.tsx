@@ -1,10 +1,13 @@
-﻿import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import throttle from "lodash.throttle";
 import {
+  ArcType,
   ArcGisMapServerImageryProvider,
   Cartesian2,
   Cartesian3,
   Color,
+  EasingFunction,
+  HeightReference,
   HorizontalOrigin,
   Ion,
   IonWorldImageryStyle,
@@ -17,11 +20,11 @@ import {
   Viewer as CesiumViewer,
   createWorldImageryAsync,
   createWorldTerrainAsync,
-  HeightReference,
 } from "cesium";
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
 import type { ClusterNode, PointNode } from "@shared/types/cluster";
+import type { TripSegment } from "@shared/types/ipc";
 import { clampLat, clampLng } from "@shared/utils/geo";
 
 import { buildPointData } from "./layers";
@@ -33,6 +36,8 @@ export interface GlobeViewState {
 
 interface GlobeViewProps {
   items: Array<ClusterNode | PointNode>;
+  trips?: TripSegment[];
+  highlightedTripId?: string | null;
   onClusterClick: (cluster: ClusterNode) => void;
   onPointClick: (point: PointNode) => void;
   onPointHover: (point: PointNode | null) => void;
@@ -66,6 +71,21 @@ const WORLD_VIEW: GlobeViewState = {
   bbox: [-180, -85, 180, 85],
   zoom: 2,
 };
+
+const GLOBE_SSE_MOVING = 3.1;
+const GLOBE_SSE_IDLE = 1.8;
+const GLOBE_LOADING_DESCENDANT_LIMIT = 160;
+const GLOBE_MAX_RESOLUTION_SCALE = 1.35;
+const TRIP_COLORS = [
+  "#f97316",
+  "#22c55e",
+  "#3b82f6",
+  "#ef4444",
+  "#14b8a6",
+  "#eab308",
+  "#ec4899",
+  "#a855f7",
+];
 
 function spanToZoom(span: number): number {
   const safeSpan = Math.max(0.0001, Math.min(360, span));
@@ -155,6 +175,8 @@ function isTypingElement(target: EventTarget | null): boolean {
 
 export function GlobeView({
   items,
+  trips = [],
+  highlightedTripId = null,
   onClusterClick,
   onPointClick,
   onPointHover,
@@ -277,9 +299,9 @@ export function GlobeView({
 
     viewer.scene.backgroundColor = Color.BLACK;
     viewer.scene.globe.baseColor = Color.BLACK;
-    viewer.scene.globe.maximumScreenSpaceError = 1.6;
+    viewer.scene.globe.maximumScreenSpaceError = GLOBE_SSE_IDLE;
     viewer.scene.globe.tileCacheSize = 3_200;
-    viewer.scene.globe.loadingDescendantLimit = 96;
+    viewer.scene.globe.loadingDescendantLimit = GLOBE_LOADING_DESCENDANT_LIMIT;
     viewer.scene.globe.preloadAncestors = true;
     viewer.scene.globe.preloadSiblings = true;
     viewer.scene.globe.showGroundAtmosphere = true;
@@ -287,7 +309,7 @@ export function GlobeView({
     viewer.scene.globe.depthTestAgainstTerrain = false;
     viewer.scene.fog.enabled = false;
     viewer.scene.highDynamicRange = true;
-    viewer.resolutionScale = Math.min(window.devicePixelRatio || 1, 1.75);
+    viewer.resolutionScale = Math.min(window.devicePixelRatio || 1, GLOBE_MAX_RESOLUTION_SCALE);
     viewer.scene.screenSpaceCameraController.minimumZoomDistance = 1_200;
     viewer.scene.screenSpaceCameraController.maximumZoomDistance = 45_000_000;
     viewer.camera.setView({
@@ -299,7 +321,7 @@ export function GlobeView({
       () => {
         onViewChangeRef.current(estimateView(viewer));
       },
-      55,
+      35,
       { leading: false, trailing: true },
     );
 
@@ -307,11 +329,19 @@ export function GlobeView({
       notifyViewThrottled();
     };
 
+    const moveStartListener = () => {
+      // Favor faster low-detail tile convergence while the camera is moving.
+      viewer.scene.globe.maximumScreenSpaceError = GLOBE_SSE_MOVING;
+    };
+
     const moveEndListener = () => {
+      // Restore detail level once interaction stops.
+      viewer.scene.globe.maximumScreenSpaceError = GLOBE_SSE_IDLE;
       notifyViewThrottled.cancel();
       onViewChangeRef.current(estimateView(viewer));
     };
 
+    viewer.camera.moveStart.addEventListener(moveStartListener);
     viewer.camera.changed.addEventListener(cameraChangedListener);
     viewer.camera.moveEnd.addEventListener(moveEndListener);
     onViewChangeRef.current(estimateView(viewer));
@@ -354,6 +384,7 @@ export function GlobeView({
                 nextHeight,
               ),
               duration: clusterCount > 100 ? 0.48 : 0.7,
+              easingFunction: EasingFunction.CUBIC_OUT,
             });
           }
         }
@@ -489,6 +520,7 @@ export function GlobeView({
       notifyHover.cancel();
       notifyViewThrottled.cancel();
       window.removeEventListener("keydown", handleKeyDown);
+      viewer.camera.moveStart.removeEventListener(moveStartListener);
       viewer.camera.changed.removeEventListener(cameraChangedListener);
       viewer.camera.moveEnd.removeEventListener(moveEndListener);
       pickHandlerRef.current?.destroy();
@@ -509,6 +541,59 @@ export function GlobeView({
     const viewer = viewerRef.current;
     const nextPickMap = new Map<string, PickMeta>();
     viewer.entities.removeAll();
+
+    for (const trip of trips) {
+      if (trip.points.length === 0) {
+        continue;
+      }
+      const isHighlighted = highlightedTripId === trip.tripId;
+      const color = Color.fromCssColorString(TRIP_COLORS[trip.colorIndex % TRIP_COLORS.length]);
+      const firstPoint = trip.points[0];
+      const lastPoint = trip.points[trip.points.length - 1];
+      const lineId = `trip-line-${trip.tripId}`;
+      const startId = `trip-start-${trip.tripId}`;
+      const endId = `trip-end-${trip.tripId}`;
+
+      if (trip.points.length >= 2) {
+        const positions = trip.points.map((point) => Cartesian3.fromDegrees(point.lng, point.lat, 60));
+        viewer.entities.add({
+          id: lineId,
+          polyline: {
+            positions,
+            width: isHighlighted ? 4.2 : highlightedTripId ? 2.1 : 2.8,
+            material: color.withAlpha(isHighlighted ? 0.95 : highlightedTripId ? 0.36 : 0.78),
+            arcType: ArcType.GEODESIC,
+            clampToGround: false,
+          },
+        });
+      }
+
+      viewer.entities.add({
+        id: startId,
+        position: Cartesian3.fromDegrees(firstPoint.lng, firstPoint.lat, 20),
+        point: {
+          pixelSize: isHighlighted ? 9.5 : 8,
+          color: color.withAlpha(isHighlighted ? 1 : highlightedTripId ? 0.58 : 1),
+          outlineColor: Color.BLACK.withAlpha(0.9),
+          outlineWidth: 2,
+          heightReference: HeightReference.RELATIVE_TO_GROUND,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      });
+
+      viewer.entities.add({
+        id: endId,
+        position: Cartesian3.fromDegrees(lastPoint.lng, lastPoint.lat, 20),
+        point: {
+          pixelSize: isHighlighted ? 10.5 : 9,
+          color: Color.WHITE.withAlpha(isHighlighted ? 0.98 : highlightedTripId ? 0.7 : 0.92),
+          outlineColor: color.withAlpha(0.95),
+          outlineWidth: 2.4,
+          heightReference: HeightReference.RELATIVE_TO_GROUND,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        },
+      });
+    }
 
     for (const datum of pointData) {
       const entityId = `${datum.type}-${datum.id}`;
@@ -593,7 +678,7 @@ export function GlobeView({
 
     pickMetaRef.current = nextPickMap;
     viewer.scene.requestRender();
-  }, [pointData]);
+  }, [highlightedTripId, pointData, trips]);
 
   useEffect(() => {
     if (!viewerRef.current || !flyToRequest) {
@@ -616,8 +701,10 @@ export function GlobeView({
     viewer.camera.flyTo({
       destination: Cartesian3.fromDegrees(flyToRequest.lng, flyToRequest.lat, targetHeight),
       duration: Math.max(0.35, Math.min(1.8, flyToRequest.durationSec ?? 0.9)),
+      easingFunction: EasingFunction.QUADRATIC_IN_OUT,
     });
   }, [flyToRequest]);
 
   return <div className="globe-canvas" ref={containerRef} />;
 }
+

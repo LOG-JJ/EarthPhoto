@@ -2,6 +2,7 @@ import type { IpcContext } from './context';
 import { registerClusterHandlers } from './handlers/clusters';
 import { registerCitiesHandlers } from './handlers/cities';
 import { registerIndexingHandlers } from './handlers/indexing';
+import { registerMetricsHandlers } from './handlers/metrics';
 import { registerPointsHandlers } from './handlers/points';
 import { registerSelectFolderHandler } from './handlers/selectFolder';
 import { registerSettingsHandlers } from './handlers/settings';
@@ -17,4 +18,5 @@ export function registerIpcHandlers(context: IpcContext): void {
   registerCitiesHandlers(context);
   registerThumbnailHandlers(context);
   registerSettingsHandlers(context);
+  registerMetricsHandlers(context);
 }

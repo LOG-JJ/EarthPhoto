@@ -8,6 +8,8 @@ import { createThumbnailFromEmbeddedPreview } from './embeddedPreview';
 import { resolveFfmpegInputPath } from './ffmpegPathAlias';
 import { runFfmpegWithFallback } from './ffmpegRunner';
 
+const THUMBNAIL_FFMPEG_TIMEOUT_MS = 3500;
+
 const EMBEDDED_FIRST_EXTENSIONS = new Set([
   '.heic',
   '.heif',
@@ -142,7 +144,7 @@ async function tryCreateFromFfmpegStill(
         '2',
         tempJpg,
       ],
-    ]);
+    ], { timeoutMs: THUMBNAIL_FFMPEG_TIMEOUT_MS });
 
     await sharp(tempJpg, { failOn: 'none', sequentialRead: true })
       .rotate()
@@ -203,6 +205,10 @@ export async function createImageThumbnail(sourcePath: string, targetPath: strin
   const ext = path.extname(sourcePath).toLowerCase();
 
   if (EMBEDDED_FIRST_EXTENSIONS.has(ext)) {
+    const recovered = await createThumbnailFromEmbeddedPreview(sourcePath, targetPath, size, { quality, effort });
+    if (recovered) {
+      return;
+    }
     if (HEIC_EXTENSIONS.has(ext) && (await tryCreateFromHeicDecode(sourcePath, targetPath, size, quality))) {
       return;
     }
@@ -210,10 +216,6 @@ export async function createImageThumbnail(sourcePath: string, targetPath: strin
       return;
     }
     if (await tryCreateFromFfmpegStill(sourcePath, targetPath, size, quality)) {
-      return;
-    }
-    const recovered = await createThumbnailFromEmbeddedPreview(sourcePath, targetPath, size, { quality, effort });
-    if (recovered) {
       return;
     }
   }

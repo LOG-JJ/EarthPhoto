@@ -2,7 +2,7 @@ import { shell } from 'electron';
 
 import { IPC_CHANNELS } from '@main/ipc/channels';
 import type { IpcContext } from '@main/ipc/context';
-import type { ThumbnailPriority } from '@shared/types/ipc';
+import type { PreviewStripProgressPayload, PreviewStripRequestPayload, ThumbnailPriority } from '@shared/types/ipc';
 import type { Filters } from '@shared/types/settings';
 
 export function registerThumbnailHandlers({ ipcMain, thumbnailService }: IpcContext): void {
@@ -27,6 +27,20 @@ export function registerThumbnailHandlers({ ipcMain, thumbnailService }: IpcCont
     },
   );
 
+  ipcMain.handle(IPC_CHANNELS.MEDIA_REQUEST_PREVIEW_STRIP, async (event, payload: PreviewStripRequestPayload) => {
+    const sendProgress = (progress: PreviewStripProgressPayload) => {
+      if (event.sender.isDestroyed()) {
+        return;
+      }
+      event.sender.send(IPC_CHANNELS.MEDIA_PREVIEW_STRIP_PROGRESS, progress);
+    };
+    return thumbnailService.requestPreviewStrip(payload, sendProgress);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.MEDIA_CANCEL_PREVIEW_STRIP, async (_event, payload: { requestId: string }) => {
+    return thumbnailService.cancelPreviewStrip(payload.requestId);
+  });
+
   ipcMain.handle(IPC_CHANNELS.MEDIA_COUNT_PREFETCH_TARGETS, async (_event, payload: { filters: Filters }) => {
     return thumbnailService.countPrefetchTargets(payload.filters);
   });
@@ -44,6 +58,17 @@ export function registerThumbnailHandlers({ ipcMain, thumbnailService }: IpcCont
       return thumbnailService.getHoverPreview(payload.photoId, payload.width ?? 320);
     },
   );
+
+  ipcMain.handle(
+    IPC_CHANNELS.MEDIA_GET_DAILY_COUNTS,
+    async (_event, payload: { filters: Filters; limit?: number }) => {
+      return thumbnailService.getDailyCounts(payload.filters, payload.limit);
+    },
+  );
+
+  ipcMain.handle(IPC_CHANNELS.MEDIA_GET_TIMELINE_EXTENT, async (_event, payload: { filters: Filters }) => {
+    return thumbnailService.getTimelineExtent(payload.filters);
+  });
 
   ipcMain.handle(IPC_CHANNELS.MEDIA_GET_SOURCE, async (_event, payload: { photoId: number }) => {
     return thumbnailService.getSource(payload.photoId);

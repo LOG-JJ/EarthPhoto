@@ -1,7 +1,10 @@
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
+
+import type { HoverPreviewInfo } from '@shared/types/ipc';
 
 interface HoverPreviewProps {
-  preview: { photoId: number; path: string; kind: 'image' | 'video' } | null;
+  preview: (HoverPreviewInfo & { photoId: number }) | null;
   isLoading?: boolean;
 }
 
@@ -10,6 +13,7 @@ function toPreviewUrl(filePath: string): string {
 }
 
 export function HoverPreview({ preview, isLoading = false }: HoverPreviewProps) {
+  const { t } = useTranslation();
   const source = useMemo(() => {
     if (!preview) {
       return null;
@@ -23,11 +27,22 @@ export function HoverPreview({ preview, isLoading = false }: HoverPreviewProps) 
 
   return (
     <aside className="hover-preview">
-      <h4>Hover Preview</h4>
+      <h4>{t('hover.title')}</h4>
       {source ? (
-        <img className="hover-preview-image" src={source} alt={`hover-preview-${preview?.photoId ?? 'media'}`} />
+        preview?.kind === 'video' ? (
+          <video
+            className="hover-preview-image"
+            src={source}
+            muted
+            loop
+            autoPlay
+            playsInline
+          />
+        ) : (
+          <img className="hover-preview-image" src={source} alt={`hover-preview-${preview?.photoId ?? 'media'}`} />
+        )
       ) : (
-        <p>Loading...</p>
+        <p>{t('hover.loading')}</p>
       )}
     </aside>
   );

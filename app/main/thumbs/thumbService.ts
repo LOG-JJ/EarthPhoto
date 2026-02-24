@@ -4,7 +4,15 @@ import path from 'node:path';
 
 import { PhotosRepository } from '@main/db/repositories/photosRepo';
 import sharp from 'sharp';
-import type { HoverPreviewInfo, MediaSourceInfo, ThumbnailPriority } from '@shared/types/ipc';
+import type {
+  DateMediaCountItem,
+  HoverPreviewInfo,
+  MediaSourceInfo,
+  PreviewStripProgressPayload,
+  PreviewStripRequestPayload,
+  ThumbnailPriority,
+  TimelineExtentInfo,
+} from '@shared/types/ipc';
 import type { Filters } from '@shared/types/settings';
 
 import { ensureThumbnailDir, getHoverPreviewPath, getPlaceholderPath, getThumbnailPath } from './cachePath';
@@ -33,6 +41,26 @@ interface FailureState {
   placeholderPath: string;
 }
 
+interface PreviewStripState {
+  requestId: string;
+  size: 64 | 128;
+  cancelled: boolean;
+  done: number;
+  total: number;
+  highQueue: number[];
+  normalQueue: number[];
+  lowQueue: number[];
+  runningHighWorkers: number;
+  runningBackgroundWorkers: number;
+  emit: (progress: PreviewStripProgressPayload) => void;
+}
+
+const BASE_HIGH_CONCURRENCY = 1;
+const BASE_BACKGROUND_CONCURRENCY = 1;
+const BURST_WINDOW_MS = 1_600;
+const BURST_HIGH_CONCURRENCY = 4;
+const BURST_BACKGROUND_CONCURRENCY = 1;
+
 function priorityWeight(priority: ThumbnailPriority): number {
   if (priority === 'high') {
     return 3;
@@ -50,14 +78,18 @@ export class ThumbnailService {
   private readonly hoverMemoryCache = new Map<string, HoverPreviewInfo>();
   private readonly maxMemoryItems = 800;
   private readonly maxHoverMemoryItems = 320;
-  private readonly generationMaxConcurrency = Math.max(2, Math.min(6, Math.floor(os.cpus().length / 2)));
   private readonly generationHighQueue: GenerationJob[] = [];
   private readonly generationNormalQueue: GenerationJob[] = [];
   private readonly generationLowQueue: GenerationJob[] = [];
   private readonly generationJobs = new Map<string, GenerationJob>();
   private readonly failureByKey = new Map<string, FailureState>();
+  private readonly previewStripRequests = new Map<string, PreviewStripState>();
   private readonly failureCooldownMs = 10 * 60 * 1000;
   private runningGenerationCount = 0;
+  private runningHighPriorityCount = 0;
+  private runningBackgroundCount = 0;
+  private burstUntilMs = 0;
+  private burstResetTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly photosRepo: PhotosRepository,
@@ -127,6 +159,85 @@ export class ThumbnailService {
     return { queued: uniqueIds.length };
   }
 
+  requestPreviewStrip(
+    payload: PreviewStripRequestPayload,
+    emit: (progress: PreviewStripProgressPayload) => void,
+  ): { ok: boolean } {
+    const requestId = payload.requestId.trim();
+    if (!requestId) {
+      return { ok: false };
+    }
+
+    this.cancelPreviewStrip(requestId);
+
+    const uniqueIds = [...new Set(payload.photoIds)].filter((id) => Number.isInteger(id) && id > 0).slice(0, 1_000);
+    const safeVisibleCount = Math.max(1, Math.min(200, Math.trunc(payload.visibleCount) || 1));
+    const highCount = Math.min(uniqueIds.length, safeVisibleCount);
+    const normalCount = Math.min(Math.max(0, uniqueIds.length - highCount), safeVisibleCount);
+    const highQueue = uniqueIds.slice(0, highCount);
+    const normalQueue = uniqueIds.slice(highCount, highCount + normalCount);
+    const lowQueue = uniqueIds.slice(highCount + normalCount);
+
+    const state: PreviewStripState = {
+      requestId,
+      size: payload.size,
+      cancelled: false,
+      done: 0,
+      total: uniqueIds.length,
+      highQueue,
+      normalQueue,
+      lowQueue,
+      runningHighWorkers: 0,
+      runningBackgroundWorkers: 0,
+      emit,
+    };
+    this.previewStripRequests.set(requestId, state);
+
+    if (payload.burst === 'aggressive') {
+      this.activateBurstWindow(BURST_WINDOW_MS);
+    }
+
+    if (state.total === 0) {
+      emit({
+        requestId: state.requestId,
+        photoId: 0,
+        path: null,
+        cacheHit: true,
+        done: 0,
+        total: 0,
+        status: 'complete',
+      });
+      this.previewStripRequests.delete(state.requestId);
+      return { ok: true };
+    }
+
+    this.pumpPreviewStripWorkers(state);
+    return { ok: true };
+  }
+
+  cancelPreviewStrip(requestId: string): { ok: boolean } {
+    const state = this.previewStripRequests.get(requestId);
+    if (!state) {
+      return { ok: true };
+    }
+
+    state.cancelled = true;
+    state.highQueue.length = 0;
+    state.normalQueue.length = 0;
+    state.lowQueue.length = 0;
+    this.previewStripRequests.delete(requestId);
+    state.emit({
+      requestId: state.requestId,
+      photoId: 0,
+      path: null,
+      cacheHit: false,
+      done: state.done,
+      total: state.total,
+      status: 'cancelled',
+    });
+    return { ok: true };
+  }
+
   countPrefetchTargets(filters: Filters): { total: number } {
     return {
       total: this.photosRepo.countPrefetchTargets(filters),
@@ -137,6 +248,14 @@ export class ThumbnailService {
     return {
       ids: this.photosRepo.getPrefetchTargetIds(filters, limit, offset),
     };
+  }
+
+  getTimelineExtent(filters: Filters): TimelineExtentInfo {
+    return this.photosRepo.getTimelineExtent(filters);
+  }
+
+  getDailyCounts(filters: Filters, limit?: number): DateMediaCountItem[] {
+    return this.photosRepo.getDailyCounts(filters, limit);
   }
 
   getSource(photoId: number): MediaSourceInfo {
@@ -392,18 +511,67 @@ export class ThumbnailService {
     this.generationLowQueue.push(job);
   }
 
+  private isBurstActive(): boolean {
+    return Date.now() < this.burstUntilMs;
+  }
+
+  private getGenerationHighConcurrencyLimit(): number {
+    return this.isBurstActive() ? BURST_HIGH_CONCURRENCY : BASE_HIGH_CONCURRENCY;
+  }
+
+  private getGenerationBackgroundConcurrencyLimit(): number {
+    return this.isBurstActive() ? BURST_BACKGROUND_CONCURRENCY : BASE_BACKGROUND_CONCURRENCY;
+  }
+
+  private getGenerationTotalConcurrencyLimit(): number {
+    return this.getGenerationHighConcurrencyLimit() + this.getGenerationBackgroundConcurrencyLimit();
+  }
+
+  private activateBurstWindow(windowMs: number): void {
+    const now = Date.now();
+    this.burstUntilMs = Math.max(this.burstUntilMs, now + windowMs);
+    if (this.burstResetTimer) {
+      clearTimeout(this.burstResetTimer);
+      this.burstResetTimer = null;
+    }
+    const remainingMs = Math.max(0, this.burstUntilMs - now);
+    this.burstResetTimer = setTimeout(() => {
+      this.burstResetTimer = null;
+      this.drainGenerationQueue();
+      for (const state of this.previewStripRequests.values()) {
+        this.pumpPreviewStripWorkers(state);
+      }
+    }, remainingMs);
+    this.drainGenerationQueue();
+  }
+
   private takeNextGenerationJob(): GenerationJob | null {
-    return this.generationHighQueue.shift() ?? this.generationNormalQueue.shift() ?? this.generationLowQueue.shift() ?? null;
+    return this.generationHighQueue.shift() ?? null;
+  }
+
+  private takeNextBackgroundJob(): GenerationJob | null {
+    return this.generationNormalQueue.shift() ?? this.generationLowQueue.shift() ?? null;
   }
 
   private drainGenerationQueue(): void {
-    while (this.runningGenerationCount < this.generationMaxConcurrency) {
-      const job = this.takeNextGenerationJob();
+    while (this.runningGenerationCount < this.getGenerationTotalConcurrencyLimit()) {
+      let job: GenerationJob | null = null;
+      if (this.runningHighPriorityCount < this.getGenerationHighConcurrencyLimit()) {
+        job = this.takeNextGenerationJob();
+      }
+      if (!job && this.runningBackgroundCount < this.getGenerationBackgroundConcurrencyLimit()) {
+        job = this.takeNextBackgroundJob();
+      }
       if (!job) {
         return;
       }
 
       this.runningGenerationCount += 1;
+      if (job.priority === 'high') {
+        this.runningHighPriorityCount += 1;
+      } else {
+        this.runningBackgroundCount += 1;
+      }
       job.started = true;
       this.generationJobs.delete(job.key);
 
@@ -412,9 +580,143 @@ export class ThumbnailService {
         .catch(() => {})
         .finally(() => {
           this.runningGenerationCount = Math.max(0, this.runningGenerationCount - 1);
+          if (job.priority === 'high') {
+            this.runningHighPriorityCount = Math.max(0, this.runningHighPriorityCount - 1);
+          } else {
+            this.runningBackgroundCount = Math.max(0, this.runningBackgroundCount - 1);
+          }
           this.drainGenerationQueue();
         });
     }
+  }
+
+  private pumpPreviewStripWorkers(state: PreviewStripState): void {
+    if (state.cancelled || this.previewStripRequests.get(state.requestId) !== state) {
+      return;
+    }
+
+    const highWorkersLimit = this.getGenerationHighConcurrencyLimit();
+    const backgroundWorkersLimit = this.getGenerationBackgroundConcurrencyLimit();
+
+    while (state.runningHighWorkers < highWorkersLimit && state.highQueue.length > 0) {
+      const nextPhotoId = state.highQueue.shift();
+      if (typeof nextPhotoId !== 'number') {
+        break;
+      }
+      state.runningHighWorkers += 1;
+      void this.runPreviewStripWorkerTask(state, nextPhotoId, 'high', 'high');
+    }
+
+    while (state.runningBackgroundWorkers < backgroundWorkersLimit) {
+      const next = this.takeNextPreviewStripBackgroundTask(state);
+      if (!next) {
+        break;
+      }
+      state.runningBackgroundWorkers += 1;
+      void this.runPreviewStripWorkerTask(state, next.photoId, next.priority, 'background');
+    }
+
+    this.completePreviewStripIfDone(state);
+  }
+
+  private takeNextPreviewStripBackgroundTask(
+    state: PreviewStripState,
+  ): { photoId: number; priority: Extract<ThumbnailPriority, 'normal' | 'low'> } | null {
+    const normalPhotoId = state.normalQueue.shift();
+    if (typeof normalPhotoId === 'number') {
+      return {
+        photoId: normalPhotoId,
+        priority: 'normal',
+      };
+    }
+    const lowPhotoId = state.lowQueue.shift();
+    if (typeof lowPhotoId === 'number') {
+      return {
+        photoId: lowPhotoId,
+        priority: 'low',
+      };
+    }
+    return null;
+  }
+
+  private async runPreviewStripWorkerTask(
+    state: PreviewStripState,
+    photoId: number,
+    priority: ThumbnailPriority,
+    lane: 'high' | 'background',
+  ): Promise<void> {
+    try {
+      const result = await this.getThumbnail(photoId, state.size, priority);
+      this.emitPreviewStripItem(state, {
+        photoId,
+        path: result.path,
+        cacheHit: result.cacheHit,
+        status: 'ready',
+      });
+    } catch {
+      this.emitPreviewStripItem(state, {
+        photoId,
+        path: null,
+        cacheHit: false,
+        status: 'error',
+      });
+    } finally {
+      if (lane === 'high') {
+        state.runningHighWorkers = Math.max(0, state.runningHighWorkers - 1);
+      } else {
+        state.runningBackgroundWorkers = Math.max(0, state.runningBackgroundWorkers - 1);
+      }
+
+      if (state.cancelled || this.previewStripRequests.get(state.requestId) !== state) {
+        return;
+      }
+      this.pumpPreviewStripWorkers(state);
+    }
+  }
+
+  private emitPreviewStripItem(
+    state: PreviewStripState,
+    payload: Pick<PreviewStripProgressPayload, 'photoId' | 'path' | 'cacheHit' | 'status'>,
+  ): void {
+    if (state.cancelled || this.previewStripRequests.get(state.requestId) !== state) {
+      return;
+    }
+    state.done = Math.min(state.total, state.done + 1);
+    state.emit({
+      requestId: state.requestId,
+      photoId: payload.photoId,
+      path: payload.path,
+      cacheHit: payload.cacheHit,
+      done: state.done,
+      total: state.total,
+      status: payload.status,
+    });
+    this.completePreviewStripIfDone(state);
+  }
+
+  private completePreviewStripIfDone(state: PreviewStripState): void {
+    if (state.cancelled || this.previewStripRequests.get(state.requestId) !== state) {
+      return;
+    }
+    if (state.done < state.total) {
+      return;
+    }
+    if (state.runningHighWorkers > 0 || state.runningBackgroundWorkers > 0) {
+      return;
+    }
+    if (state.highQueue.length > 0 || state.normalQueue.length > 0 || state.lowQueue.length > 0) {
+      return;
+    }
+    state.emit({
+      requestId: state.requestId,
+      photoId: 0,
+      path: null,
+      cacheHit: true,
+      done: state.done,
+      total: state.total,
+      status: 'complete',
+    });
+    this.previewStripRequests.delete(state.requestId);
   }
 
   private promoteGenerationJob(key: string, requested: ThumbnailPriority): void {

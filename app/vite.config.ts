@@ -13,6 +13,7 @@ const aliases = {
 };
 
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
     cesium(),

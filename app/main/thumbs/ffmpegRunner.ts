@@ -25,10 +25,6 @@ function getFfmpegCandidates(): string[] {
   return [...new Set(candidates)];
 }
 
-function runSingleFfmpeg(command: string, args: string[]): Promise<void> {
-  return runSingleFfmpegCore(command, args).then(() => undefined);
-}
-
 function runSingleFfmpegCore(
   command: string,
   args: string[],
@@ -105,14 +101,18 @@ function runSingleFfmpegCore(
   });
 }
 
-export async function runFfmpegWithFallback(argVariants: string[][]): Promise<void> {
+interface FfmpegRunOptions {
+  timeoutMs?: number;
+}
+
+export async function runFfmpegWithFallback(argVariants: string[][], options: FfmpegRunOptions = {}): Promise<void> {
   const candidates = getFfmpegCandidates();
   const errors: string[] = [];
 
   for (const command of candidates) {
     for (const args of argVariants) {
       try {
-        await runSingleFfmpeg(command, args);
+        await runSingleFfmpegCore(command, args, { timeoutMs: options.timeoutMs });
         return;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -124,7 +124,11 @@ export async function runFfmpegWithFallback(argVariants: string[][]): Promise<vo
   throw new Error(`FFmpeg failed for all candidates. ${errors.slice(-4).join(' | ')}`);
 }
 
-export async function runFfmpegPipeInputToBuffer(argVariants: string[][], inputFilePath: string): Promise<Buffer> {
+export async function runFfmpegPipeInputToBuffer(
+  argVariants: string[][],
+  inputFilePath: string,
+  options: FfmpegRunOptions = {},
+): Promise<Buffer> {
   const candidates = getFfmpegCandidates();
   const errors: string[] = [];
 
@@ -134,6 +138,7 @@ export async function runFfmpegPipeInputToBuffer(argVariants: string[][], inputF
         const output = await runSingleFfmpegCore(command, args, {
           inputFilePath,
           captureStdout: true,
+          timeoutMs: options.timeoutMs,
         });
         if (output && output.length > 0) {
           return output;
@@ -149,7 +154,11 @@ export async function runFfmpegPipeInputToBuffer(argVariants: string[][], inputF
   throw new Error(`FFmpeg failed for all candidates. ${errors.slice(-4).join(' | ')}`);
 }
 
-export async function runFfmpegPipeInputToFile(argVariants: string[][], inputFilePath: string): Promise<void> {
+export async function runFfmpegPipeInputToFile(
+  argVariants: string[][],
+  inputFilePath: string,
+  options: FfmpegRunOptions = {},
+): Promise<void> {
   const candidates = getFfmpegCandidates();
   const errors: string[] = [];
 
@@ -159,6 +168,7 @@ export async function runFfmpegPipeInputToFile(argVariants: string[][], inputFil
         await runSingleFfmpegCore(command, args, {
           inputFilePath,
           captureStdout: false,
+          timeoutMs: options.timeoutMs,
         });
         return;
       } catch (error) {

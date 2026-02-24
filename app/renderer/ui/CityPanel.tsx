@@ -1,260 +1,148 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { CityCatalogStatus, CityItem, ContinentItem, CountryItem } from '@shared/types/ipc';
 
-import { DEFAULT_MAJOR_CITY_IDS } from '@renderer/cityDefaults';
-
-const PAGE_SIZE = 100;
+import { CityFavoriteGroup } from './CityFavoriteGroup';
+import { CityListItem } from './CityListItem';
 
 interface CityPanelProps {
-  active: boolean;
-  userFavoriteCityIds: string[];
-  onChangeFavoriteCityIds: (ids: string[]) => Promise<void>;
+  catalogStatus: CityCatalogStatus | null;
+  catalogStatusText: string;
+  continents: ContinentItem[];
+  countries: CountryItem[];
+  cities: CityItem[];
+  groupedFavorites: Array<[string, CityItem[]]>;
+  selectedContinentCode: string;
+  selectedCountryCode: string;
+  query: string;
+  hasMore: boolean;
+  loadingCatalog: boolean;
+  loadingCountries: boolean;
+  loadingCities: boolean;
+  savingFavorites: boolean;
+  errorMessage: string | null;
+  isFavorite: (cityId: string) => boolean;
+  isDefaultFavorite: (cityId: string) => boolean;
+  onRetryCatalog: () => void;
+  onSelectContinent: (code: string) => void;
+  onSelectCountry: (code: string) => void;
+  onQueryChange: (query: string) => void;
+  onLoadMore: () => void;
+  onToggleFavorite: (cityId: string) => void;
   onFlyTo: (city: CityItem) => void;
 }
 
-function getCatalogStatusText(t: (key: string) => string, status: CityCatalogStatus | null): string {
-  if (!status) {
-    return t('cities.catalogIdle');
-  }
-  switch (status.phase) {
-    case 'downloading':
-      return t('cities.catalogDownloading');
-    case 'importing':
-      return t('cities.catalogImporting');
-    case 'ready':
-      return t('cities.catalogReady');
-    case 'error':
-      return t('cities.catalogError');
-    default:
-      return t('cities.catalogIdle');
-  }
-}
+const CITY_ROW_HEIGHT = 66;
+const CITY_LIST_FALLBACK_HEIGHT = 320;
+const CITY_OVERSCAN = 8;
 
-export function CityPanel({ active, userFavoriteCityIds, onChangeFavoriteCityIds, onFlyTo }: CityPanelProps) {
+export function CityPanel({
+  catalogStatus,
+  catalogStatusText,
+  continents,
+  countries,
+  cities,
+  groupedFavorites,
+  selectedContinentCode,
+  selectedCountryCode,
+  query,
+  hasMore,
+  loadingCatalog,
+  loadingCountries,
+  loadingCities,
+  savingFavorites,
+  errorMessage,
+  isFavorite,
+  isDefaultFavorite,
+  onRetryCatalog,
+  onSelectContinent,
+  onSelectCountry,
+  onQueryChange,
+  onLoadMore,
+  onToggleFavorite,
+  onFlyTo,
+}: CityPanelProps) {
   const { t } = useTranslation();
-  const [catalogStatus, setCatalogStatus] = useState<CityCatalogStatus | null>(null);
-  const [continents, setContinents] = useState<ContinentItem[]>([]);
-  const [countries, setCountries] = useState<CountryItem[]>([]);
-  const [cities, setCities] = useState<CityItem[]>([]);
-  const [favoriteCities, setFavoriteCities] = useState<CityItem[]>([]);
-  const [selectedContinentCode, setSelectedContinentCode] = useState('');
-  const [selectedCountryCode, setSelectedCountryCode] = useState('');
-  const [query, setQuery] = useState('');
-  const [offset, setOffset] = useState(0);
-  const [hasMore, setHasMore] = useState(false);
-  const [loadingCatalog, setLoadingCatalog] = useState(false);
-  const [loadingCountries, setLoadingCountries] = useState(false);
-  const [loadingCities, setLoadingCities] = useState(false);
-  const [savingFavorites, setSavingFavorites] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const requestSeqRef = useRef(0);
-
-  const defaultFavoriteSet = useMemo(() => new Set(DEFAULT_MAJOR_CITY_IDS), []);
-  const mergedFavoriteIds = useMemo(
-    () => Array.from(new Set([...DEFAULT_MAJOR_CITY_IDS, ...userFavoriteCityIds])),
-    [userFavoriteCityIds],
-  );
-  const userFavoriteSet = useMemo(() => new Set(userFavoriteCityIds), [userFavoriteCityIds]);
-
-  const groupedFavorites = useMemo(() => {
-    const groups = new Map<string, CityItem[]>();
-    for (const city of favoriteCities) {
-      const key = city.continentName;
-      const group = groups.get(key);
-      if (group) {
-        group.push(city);
-      } else {
-        groups.set(key, [city]);
-      }
-    }
-    return Array.from(groups.entries()).sort((a, b) => a[0].localeCompare(b[0]));
-  }, [favoriteCities]);
-
-  const loadContinents = useCallback(async () => {
-    const items = await window.photoGlobe.cities.getContinents();
-    setContinents(items);
-    if (items.length === 0) {
-      setSelectedContinentCode('');
-      return;
-    }
-    setSelectedContinentCode((current) => (current && items.some((item) => item.code === current) ? current : items[0].code));
-  }, []);
-
-  const ensureCatalog = useCallback(async () => {
-    setLoadingCatalog(true);
-    setErrorMessage(null);
-    try {
-      const status = await window.photoGlobe.cities.ensureCatalog();
-      setCatalogStatus(status);
-      if (status.phase === 'ready') {
-        await loadContinents();
-      } else if (status.phase === 'error') {
-        setErrorMessage(status.message ?? t('cities.catalogError'));
-      }
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLoadingCatalog(false);
-    }
-  }, [loadContinents, t]);
-
-  const loadCountries = useCallback(async (continentCode: string) => {
-    if (!continentCode) {
-      setCountries([]);
-      setSelectedCountryCode('');
-      return;
-    }
-    setLoadingCountries(true);
-    try {
-      const next = await window.photoGlobe.cities.getCountries({ continentCode });
-      setCountries(next);
-      setSelectedCountryCode((current) => (current && next.some((item) => item.code === current) ? current : next[0]?.code ?? ''));
-    } finally {
-      setLoadingCountries(false);
-    }
-  }, []);
-
-  const loadCities = useCallback(
-    async (params: { reset: boolean; nextOffset: number }) => {
-      if (!selectedContinentCode || !selectedCountryCode) {
-        setCities([]);
-        setOffset(0);
-        setHasMore(false);
-        return;
-      }
-      const seq = requestSeqRef.current + 1;
-      requestSeqRef.current = seq;
-      setLoadingCities(true);
-      try {
-        const rows = await window.photoGlobe.cities.getCities({
-          continentCode: selectedContinentCode,
-          countryCode: selectedCountryCode,
-          query,
-          limit: PAGE_SIZE,
-          offset: params.nextOffset,
-        });
-        if (requestSeqRef.current !== seq) {
-          return;
-        }
-        setHasMore(rows.length === PAGE_SIZE);
-        setOffset(params.nextOffset);
-        if (params.reset) {
-          setCities(rows);
-        } else {
-          setCities((current) => {
-            const existing = new Map(current.map((item) => [item.id, item]));
-            for (const row of rows) {
-              existing.set(row.id, row);
-            }
-            return Array.from(existing.values());
-          });
-        }
-      } finally {
-        if (requestSeqRef.current === seq) {
-          setLoadingCities(false);
-        }
-      }
-    },
-    [query, selectedContinentCode, selectedCountryCode],
-  );
-
-  const loadFavoriteCities = useCallback(async () => {
-    if (!active || mergedFavoriteIds.length === 0) {
-      setFavoriteCities([]);
-      return;
-    }
-    const rows = await window.photoGlobe.cities.getByIds({ ids: mergedFavoriteIds });
-    setFavoriteCities(rows);
-  }, [active, mergedFavoriteIds]);
-
-  const handleToggleFavorite = useCallback(
-    async (cityId: string) => {
-      if (defaultFavoriteSet.has(cityId)) {
-        return;
-      }
-      setSavingFavorites(true);
-      try {
-        const nextSet = new Set(userFavoriteCityIds);
-        if (nextSet.has(cityId)) {
-          nextSet.delete(cityId);
-        } else {
-          nextSet.add(cityId);
-        }
-        await onChangeFavoriteCityIds(Array.from(nextSet));
-      } finally {
-        setSavingFavorites(false);
-      }
-    },
-    [defaultFavoriteSet, onChangeFavoriteCityIds, userFavoriteCityIds],
-  );
+  const cityListRef = useRef<HTMLDivElement | null>(null);
+  const [cityScrollTop, setCityScrollTop] = useState(0);
+  const [cityViewportHeight, setCityViewportHeight] = useState(CITY_LIST_FALLBACK_HEIGHT);
 
   useEffect(() => {
-    const unsubscribe = window.photoGlobe.cities.onCatalogProgress((progress) => {
-      setCatalogStatus(progress);
-      if (progress.phase === 'error') {
-        setErrorMessage(progress.message ?? t('cities.catalogError'));
-      }
-      if (progress.phase === 'ready') {
-        setErrorMessage(null);
-        void loadContinents();
-      }
-    });
-    return unsubscribe;
-  }, [loadContinents, t]);
+    const node = cityListRef.current;
+    if (!node) {
+      return;
+    }
 
-  useEffect(() => {
-    if (!active) {
-      return;
-    }
-    if (catalogStatus?.phase === 'ready') {
-      void loadContinents();
-      return;
-    }
-    void ensureCatalog();
-  }, [active, catalogStatus?.phase, ensureCatalog, loadContinents]);
-
-  useEffect(() => {
-    if (!active || catalogStatus?.phase !== 'ready') {
-      return;
-    }
-    void loadCountries(selectedContinentCode);
-  }, [active, catalogStatus?.phase, loadCountries, selectedContinentCode]);
-
-  useEffect(() => {
-    if (!active || catalogStatus?.phase !== 'ready') {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void loadCities({ reset: true, nextOffset: 0 });
-    }, 180);
-    return () => {
-      window.clearTimeout(timer);
+    const syncViewportHeight = () => {
+      const nextHeight = node.clientHeight || CITY_LIST_FALLBACK_HEIGHT;
+      setCityViewportHeight(nextHeight);
     };
-  }, [active, catalogStatus?.phase, loadCities, query, selectedCountryCode, selectedContinentCode]);
+    syncViewportHeight();
 
-  useEffect(() => {
-    if (catalogStatus?.phase !== 'ready') {
+    if (typeof ResizeObserver === 'undefined') {
       return;
     }
-    void loadFavoriteCities();
-  }, [catalogStatus?.phase, loadFavoriteCities, mergedFavoriteIds]);
+    const observer = new ResizeObserver(syncViewportHeight);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const node = cityListRef.current;
+    if (!node) {
+      return;
+    }
+    const maxScrollTop = Math.max(0, cities.length * CITY_ROW_HEIGHT - node.clientHeight);
+    if (node.scrollTop > maxScrollTop) {
+      node.scrollTop = maxScrollTop;
+      setCityScrollTop(maxScrollTop);
+    }
+  }, [cities.length]);
+
+  const virtualRange = useMemo(() => {
+    const itemCount = cities.length;
+    if (itemCount === 0) {
+      return {
+        startIndex: 0,
+        endIndex: 0,
+        totalHeight: 0,
+        topSpacerHeight: 0,
+        bottomSpacerHeight: 0,
+        visibleCities: [] as CityItem[],
+      };
+    }
+
+    const totalHeight = itemCount * CITY_ROW_HEIGHT;
+    const visibleCount = Math.max(1, Math.ceil(cityViewportHeight / CITY_ROW_HEIGHT) + CITY_OVERSCAN * 2);
+    const startIndex = Math.max(0, Math.floor(cityScrollTop / CITY_ROW_HEIGHT) - CITY_OVERSCAN);
+    const endIndex = Math.min(itemCount, startIndex + visibleCount);
+    const topSpacerHeight = startIndex * CITY_ROW_HEIGHT;
+    const bottomSpacerHeight = Math.max(0, totalHeight - endIndex * CITY_ROW_HEIGHT);
+    const visibleCities = cities.slice(startIndex, endIndex);
+
+    return {
+      startIndex,
+      endIndex,
+      totalHeight,
+      topSpacerHeight,
+      bottomSpacerHeight,
+      visibleCities,
+    };
+  }, [cities, cityScrollTop, cityViewportHeight]);
 
   return (
     <div className="city-panel">
       <section className="panel city-status-card">
         <h3>{t('cities.catalogTitle')}</h3>
         <p className="status-text">
-          {getCatalogStatusText(t, catalogStatus)} {catalogStatus ? `(${Math.floor(catalogStatus.percent)}%)` : ''}
+          {catalogStatusText} {catalogStatus ? `(${Math.floor(catalogStatus.percent)}%)` : ''}
         </p>
         {catalogStatus?.rowCount ? (
-          <p className="status-text">
-            {t('cities.catalogRows')}: {catalogStatus.rowCount.toLocaleString()}
-          </p>
+          <p className="status-text">{t('cities.catalogRows')}: {catalogStatus.rowCount.toLocaleString()}</p>
         ) : null}
         {errorMessage ? <p className="status-text status-text-error">{errorMessage}</p> : null}
-        <button type="button" onClick={() => void ensureCatalog()} disabled={loadingCatalog}>
+        <button type="button" onClick={onRetryCatalog} disabled={loadingCatalog}>
           {loadingCatalog ? t('cities.catalogLoading') : t('cities.catalogRetry')}
         </button>
       </section>
@@ -265,22 +153,7 @@ export function CityPanel({ active, userFavoriteCityIds, onChangeFavoriteCityIds
           <p className="status-text">{t('cities.noFavorites')}</p>
         ) : (
           groupedFavorites.map(([continentName, rows]) => (
-            <div key={continentName} className="city-favorite-group">
-              <strong>{continentName}</strong>
-              <div className="city-chip-list">
-                {rows.map((city) => (
-                  <button
-                    key={city.id}
-                    type="button"
-                    className="city-chip-btn"
-                    onClick={() => onFlyTo(city)}
-                    title={`${city.countryName} (${city.lat.toFixed(4)}, ${city.lng.toFixed(4)})`}
-                  >
-                    {city.name}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <CityFavoriteGroup key={continentName} continentName={continentName} cities={rows} onFlyTo={onFlyTo} />
           ))
         )}
       </section>
@@ -292,7 +165,7 @@ export function CityPanel({ active, userFavoriteCityIds, onChangeFavoriteCityIds
             {t('cities.continent')}
             <select
               value={selectedContinentCode}
-              onChange={(event) => setSelectedContinentCode(event.target.value)}
+              onChange={(event) => onSelectContinent(event.target.value)}
               disabled={catalogStatus?.phase !== 'ready'}
             >
               {continents.map((item) => (
@@ -306,7 +179,7 @@ export function CityPanel({ active, userFavoriteCityIds, onChangeFavoriteCityIds
             {t('cities.country')}
             <select
               value={selectedCountryCode}
-              onChange={(event) => setSelectedCountryCode(event.target.value)}
+              onChange={(event) => onSelectCountry(event.target.value)}
               disabled={catalogStatus?.phase !== 'ready' || loadingCountries}
             >
               {countries.map((item) => (
@@ -323,51 +196,45 @@ export function CityPanel({ active, userFavoriteCityIds, onChangeFavoriteCityIds
           <input
             type="text"
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => onQueryChange(event.target.value)}
             placeholder={t('cities.searchPlaceholder')}
             disabled={catalogStatus?.phase !== 'ready'}
           />
         </label>
 
-        <div className="city-list">
-          {cities.map((city) => {
-            const isDefault = defaultFavoriteSet.has(city.id);
-            const isUserFavorite = userFavoriteSet.has(city.id);
-            const isFavorite = isDefault || isUserFavorite;
-            return (
-              <button
-                key={city.id}
-                type="button"
-                className="city-list-item"
-                onClick={() => onFlyTo(city)}
-                title={`${city.countryName} (${city.lat.toFixed(4)}, ${city.lng.toFixed(4)})`}
-              >
-                <span className="city-list-main">
-                  <strong>{city.name}</strong>
-                  <small>{city.countryName}</small>
-                </span>
-                <span className="city-list-actions">
-                  <small>{city.population.toLocaleString()}</small>
-                  <span
-                    role="button"
-                    aria-label={isFavorite ? t('cities.unfavorite') : t('cities.favorite')}
-                    className={`city-star${isFavorite ? ' is-active' : ''}${isDefault ? ' is-default' : ''}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      void handleToggleFavorite(city.id);
-                    }}
-                  >
-                    {isFavorite ? '\u2605' : '\u2606'}
-                  </span>
-                </span>
-              </button>
-            );
-          })}
+        <div
+          className="city-list"
+          ref={cityListRef}
+          onScroll={(event) => setCityScrollTop(event.currentTarget.scrollTop)}
+        >
+          {cities.length === 0 && !loadingCities ? (
+            <p className="empty-state">{t('cities.noCities')}</p>
+          ) : (
+            <div className="city-list-canvas" style={{ height: virtualRange.totalHeight }}>
+              <div style={{ height: virtualRange.topSpacerHeight }} />
+              {virtualRange.visibleCities.map((city) => {
+                const isDefault = isDefaultFavorite(city.id);
+                return (
+                  <div key={city.id} className="city-list-row">
+                    <CityListItem
+                      city={city}
+                      isFavorite={isFavorite(city.id)}
+                      isDefault={isDefault}
+                      onFlyTo={onFlyTo}
+                      onToggleFavorite={onToggleFavorite}
+                      favoriteLabel={t('cities.favorite')}
+                      unfavoriteLabel={t('cities.unfavorite')}
+                    />
+                  </div>
+                );
+              })}
+              <div style={{ height: virtualRange.bottomSpacerHeight }} />
+            </div>
+          )}
         </div>
         {loadingCities ? <p className="status-text">{t('cities.loadingCities')}</p> : null}
         {!loadingCities && hasMore ? (
-          <button type="button" onClick={() => void loadCities({ reset: false, nextOffset: offset + PAGE_SIZE })}>
+          <button type="button" onClick={onLoadMore}>
             {t('cities.loadMore')}
           </button>
         ) : null}

@@ -1,6 +1,8 @@
 import { resolveFfmpegInputPath } from './ffmpegPathAlias';
 import { runFfmpegWithFallback } from './ffmpegRunner';
 
+const HOVER_FFMPEG_TIMEOUT_MS = 5000;
+
 export async function createVideoHoverPreview(sourcePath: string, targetPath: string, width: number): Promise<void> {
   const aliasSourcePath = await resolveFfmpegInputPath(sourcePath);
   const vf = `scale=${width}:-2:flags=fast_bilinear,fps=10,format=yuv420p`;
@@ -48,7 +50,7 @@ export async function createVideoHoverPreview(sourcePath: string, targetPath: st
         '14',
         targetPath,
       ],
-    ]);
+    ], { timeoutMs: HOVER_FFMPEG_TIMEOUT_MS });
   } catch {
     // Let caller fallback to static thumbnail image when hover clip creation fails.
     throw new Error('video hover preview generation failed');
