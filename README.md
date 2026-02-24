@@ -45,7 +45,26 @@ npm.cmd run dev
 .\start-dev.bat
 ```
 
-## 빌드/배포
+## 원클릭 설치/실행 (Windows)
+- 단일 진입점: `app\run-built.bat`
+- 기본 동작: Node/npm 확인 -> 필요 시 설치 시도(winget) -> 의존성/네이티브 모듈 준비 -> 스마트 증분 빌드 -> 앱 실행
+- 실행 대상 우선순위:
+  - `release\PhotoGlobeViewer-Portable-*.exe` 최신 파일
+  - 없으면 `release\win-unpacked\PhotoGlobeViewer.exe`
+
+```powershell
+cd app
+.\run-built.bat
+```
+
+- 옵션
+```powershell
+.\run-built.bat --build-only
+.\run-built.bat --force-rebuild
+.\run-built.bat --no-pause
+```
+
+## 빌드/배포 (수동)
 - 타입체크
 ```powershell
 npm.cmd run typecheck
@@ -68,9 +87,7 @@ npm.cmd run dist:win:portable
 
 ## 실행 스크립트 (app/)
 - `start-dev.bat`: 개발 실행
-- `build-win.bat`: Windows 빌드 도우미
-- `run-built.bat`: `win-unpacked` exe 실행
-- `share-win.bat`: 공유 패키지 생성/정리
+- `run-built.bat`: 원클릭 설치/빌드/실행 통합 스크립트
 
 ## 프로젝트 구조
 - `app/main`: Electron Main, IPC, 인덱싱, DB, 워처, 썸네일, Trip/클러스터 서비스
@@ -88,6 +105,6 @@ npm.cmd run dist:win:portable
   - 기존 프로세스 완전 종료 후 재시작
   - `npm.cmd run typecheck` / `npm.cmd run build` 통과 여부 확인
 - 네이티브 모듈 문제 발생 시:
+  - `app\run-built.bat` 재실행 (자동 복구 경로 포함)
   - `npm.cmd run postinstall` 재실행
   - Node 버전을 22 LTS로 맞춘 뒤 재설치
-
